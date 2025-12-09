@@ -81,43 +81,6 @@ def get_week_range(weeks_back: int = 0) -> tuple[str, str]:
     return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 
 
-def fetch_actions_via_report(start_date: str, end_date: str) -> list[dict]:
-    """
-    Debug: Check what fields are available in the Actions API response.
-    """
-    print(f"   🔍 Checking Actions API fields...")
-    
-    params = {
-        "CampaignId": CAMPAIGN_ID,
-        "ActionDateStart": f"{start_date}T00:00:00Z",
-        "ActionDateEnd": f"{end_date}T23:59:59Z",
-        "PageSize": 5  # Just get a few for debugging
-    }
-    
-    try:
-        response = requests.get(
-            f"{BASE_URL}/Actions",
-            auth=get_auth(),
-            params=params,
-            headers={"Accept": "application/json"}
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            actions = data.get("Actions", [])
-            
-            if actions:
-                # Print ALL fields from first action
-                print(f"      📋 All fields in Actions API response:")
-                for key, value in actions[0].items():
-                    print(f"         {key}: {value}")
-                    
-    except Exception as e:
-        print(f"      ⚠️  Error: {e}")
-    
-    return []
-
-
 def fetch_actions(start_date: str, end_date: str) -> list[dict]:
     """Fetch all conversion actions within a date range."""
     actions = []
@@ -161,11 +124,9 @@ def fetch_actions(start_date: str, end_date: str) -> list[dict]:
 def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]:
     """
     Fetch aggregated stats by media partner including clicks and costs.
-    Note: Requires Reports API access which may not be available.
+    Note: Requires Reports API access which is not currently available.
     """
-    # Skip - Reports API returns 403 for mp_performance_by_day
-    # Click data not available without Reports API access
-    print("   ℹ️  Click data not available (Reports API access required)")
+    # Reports API returns 403 - click data not available
     return {}
 
 
@@ -375,12 +336,16 @@ def format_trend(change_data: Dict, is_inverse: bool = False) -> str:
     is_positive_change = pct > 0
     is_good = is_positive_change if not is_inverse else not is_positive_change
     
-    emoji = "🟢" if is_good else "🔴" if not is_good else "⚪"
+    # Use chart emojis - up for positive change, down for negative
     if abs(pct) < 1:
-        emoji = "⚪"
+        emoji = ""
+    elif is_positive_change:
+        emoji = ":chart_with_upwards_trend:" if is_good else ":chart_with_upwards_trend:"
+    else:
+        emoji = ":chart_with_downwards_trend:" if not is_good else ":chart_with_downwards_trend:"
     
     sign = "+" if pct > 0 else ""
-    return f"{emoji} {sign}{pct:.1f}%"
+    return f"{emoji} *{sign}{pct:.1f}%*"
 
 
 def format_partner_movers(movers: list, metric_type: str) -> str:
@@ -410,25 +375,27 @@ def build_slack_message(
     current: Dict,
     changes: Dict,
     partner_drivers: Dict,
-    date_range: tuple[str, str]
+    date_range: tuple[str, str],
+    prev_date_range: tuple[str, str]
 ) -> Dict[str, Any]:
     """Build Slack Block Kit message."""
     
     start_date, end_date = date_range
+    prev_start, prev_end = prev_date_range
     
     blocks = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": "📊 Weekly Affiliate Performance Report",
+                "text": "📊 Weekly Impact Affiliate Performance Report",
                 "emoji": True
             }
         },
         {
             "type": "context",
             "elements": [
-                {"type": "mrkdwn", "text": f"*{start_date}* to *{end_date}* (Mon-Sun)"}
+                {"type": "mrkdwn", "text": f"*{start_date}* to *{end_date}*\n(vs *{prev_start}* to *{prev_end}*)"}
             ]
         },
         {"type": "divider"},
@@ -484,7 +451,7 @@ def build_slack_message(
         {
             "type": "context",
             "elements": [
-                {"type": "mrkdwn", "text": "🟢 = favorable change | 🔴 = unfavorable change | Data from Impact.com"}
+                {"type": "mrkdwn", "text": ":chart_with_upwards_trend: = increase | :chart_with_downwards_trend: = decrease | Data from Impact.com"}
             ]
         }
     ]
@@ -533,19 +500,15 @@ def run_weekly_report():
     
     # Fetch current week data
     print("📥 Fetching current week data...")
-    
-    # DEBUG: Check what fields are available in Advanced Action Listing report
-    report_actions = fetch_actions_via_report(current_start, current_end)
-    
     current_actions = fetch_actions(current_start, current_end)
     current_partner_stats = fetch_media_partner_stats(current_start, current_end)
-    print(f"   Found {len(current_actions)} actions, {len(current_partner_stats)} partners")
+    print(f"   Found {len(current_actions)} actions")
     
     # Fetch previous week data
     print("📥 Fetching previous week data...")
     previous_actions = fetch_actions(previous_start, previous_end)
     previous_partner_stats = fetch_media_partner_stats(previous_start, previous_end)
-    print(f"   Found {len(previous_actions)} actions, {len(previous_partner_stats)} partners")
+    print(f"   Found {len(previous_actions)} actions")
     
     # Process metrics
     print("🔄 Processing metrics...")
@@ -570,7 +533,7 @@ def run_weekly_report():
     print(f"   Actions (Payment Success): {fmt_num(current_metrics['payment_success_actions'])} ({fmt_pct(changes['payment_success_actions']['change_pct'])}% WoW)")
     print(f"   Total Cost: {fmt_currency(current_metrics['total_cost'])} ({fmt_pct(changes['total_cost']['change_pct'])}% WoW)")
     print(f"   CAC: {fmt_currency(current_metrics['cac'])} ({fmt_pct(changes['cac']['change_pct'])}% WoW)")
-    print(f"   Conversion Rate: {fmt_pct(current_metrics['conversion_rate'])}%")
+    print(f"   Reversal Rate: {fmt_pct(current_metrics['reversal_rate'])}%")
     
     # Build and send Slack message
     print("\n📝 Building Slack message...")
@@ -578,7 +541,8 @@ def run_weekly_report():
         current_metrics,
         changes,
         partner_drivers,
-        (current_start, current_end)
+        (current_start, current_end),
+        (previous_start, previous_end)
     )
     
     send_to_slack(message)
