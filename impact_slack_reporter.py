@@ -89,29 +89,20 @@ def fetch_actions_via_report(start_date: str, end_date: str) -> list[dict]:
     
     report_id = "adv_action_listing_pm_only"
     
-    # First, get the report metadata to see required parameters
-    try:
-        meta_response = requests.get(
-            f"{BASE_URL}/Reports/{report_id}/MetaData",
-            auth=get_auth(),
-            headers={"Accept": "application/json"}
-        )
-        
-        if meta_response.status_code == 200:
-            meta = meta_response.json()
-            print(f"      📋 Report metadata: {meta}")
-        else:
-            print(f"      ⚠️  MetaData returned {meta_response.status_code}: {meta_response.text[:200]}")
-    except Exception as e:
-        print(f"      ⚠️  MetaData error: {e}")
+    # Metadata showed filters are: 'Start Date', 'End Date', 'Campaign', etc.
+    params = {
+        "Start Date": start_date,
+        "End Date": end_date,
+        "Campaign": CAMPAIGN_ID
+    }
     
-    # Try the report with no date filters to see if we get any data
-    print(f"      Trying report with no date filter...")
+    print(f"      Trying report with params: {params}")
+    
     try:
         response = requests.get(
             f"{BASE_URL}/Reports/{report_id}",
             auth=get_auth(),
-            params={"CampaignId": CAMPAIGN_ID},
+            params=params,
             headers={"Accept": "application/json"}
         )
         
@@ -119,10 +110,6 @@ def fetch_actions_via_report(start_date: str, end_date: str) -> list[dict]:
         
         if response.status_code == 200:
             data = response.json()
-            
-            # Print top-level keys
-            print(f"      Response keys: {list(data.keys())}")
-            
             records = data.get("Records", [])
             print(f"      Records count: {len(records)}")
             
@@ -132,14 +119,16 @@ def fetch_actions_via_report(start_date: str, end_date: str) -> list[dict]:
                 text_fields = {k: v for k, v in sample.items() if 'text' in k.lower() or 'Text' in k}
                 if text_fields:
                     print(f"      📋 Text fields found: {text_fields}")
+                else:
+                    print(f"      📋 No Text fields in response")
                 return records
         else:
-            print(f"      Response: {response.text[:500]}")
+            print(f"      Response: {response.text[:300]}")
             
     except Exception as e:
         print(f"      ⚠️  Error: {e}")
     
-    print(f"   ⚠️  No reports returned data with Text fields")
+    print(f"   ⚠️  No reports returned data")
     return []
 
 
