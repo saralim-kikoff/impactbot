@@ -1,0 +1,611 @@
+"""
+Impact.com Weekly Performance Reporter → Slack
+
+Metrics tracked:
+- Actions (Payment Success)
+- Total Cost
+- CPC
+- Clicks
+- Conversion Rate (Payment Success)
+- Reversal Rate
+- CAC (Total Cost / Payment Success Actions)
+
+Setup:
+1. Set environment variables:
+   - IMPACT_ACCOUNT_SID
+   - IMPACT_AUTH_TOKEN
+   - SLACK_WEBHOOK_URL
+
+2. Schedule with cron (every Monday at 9am):
+   0 9 * * 1 python3 /path/to/impact_slack_reporter.py
+"""
+
+import os
+import requests
+from requests.auth import HTTPBasicAuth
+from datetime import datetime, timedelta
+from typing import Dict, Any, Optional
+import json
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+ACCOUNT_SID = os.getenv("IMPACT_ACCOUNT_SID")
+AUTH_TOKEN = os.getenv("IMPACT_AUTH_TOKEN")
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
+BASE_URL = f"https://api.impact.com/Advertisers/{ACCOUNT_SID}"
+
+# Validate required environment variables
+def validate_config():
+    missing = []
+    if not ACCOUNT_SID:
+        missing.append("IMPACT_ACCOUNT_SID")
+    if not AUTH_TOKEN:
+        missing.append("IMPACT_AUTH_TOKEN")
+    if not SLACK_WEBHOOK_URL:
+        missing.append("SLACK_WEBHOOK_URL")
+    if missing:
+        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+# Payment Success event type configuration
+PAYMENT_SUCCESS_EVENT_TYPE_ID = "28113"
+PAYMENT_SUCCESS_EVENT_TYPE_NAME = "Payment success"
+
+
+# =============================================================================
+# IMPACT.COM API FUNCTIONS
+# =============================================================================
+
+def get_auth() -> HTTPBasicAuth:
+    return HTTPBasicAuth(ACCOUNT_SID, AUTH_TOKEN)
+
+
+def get_week_range(weeks_back: int = 0) -> tuple[str, str]:
+    """
+    Get Monday-Sunday date range for a given week.
+    weeks_back=0 means last complete Mon-Sun week.
+    """
+    today = datetime.now()
+    # Find most recent Sunday
+    days_since_sunday = (today.weekday() + 1) % 7
+    if days_since_sunday == 0:
+        days_since_sunday = 7  # If today is Sunday, go back to last Sunday
+    last_sunday = today - timedelta(days=days_since_sunday)
+    
+    # Adjust for weeks_back
+    end_date = last_sunday - timedelta(weeks=weeks_back)
+    start_date = end_date - timedelta(days=6)  # Monday
+    
+    return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+
+
+def fetch_actions(start_date: str, end_date: str) -> list[dict]:
+    """Fetch all conversion actions within a date range."""
+    actions = []
+    page = 1
+    page_size = 100
+    
+    while True:
+        params = {
+            "StartDate": start_date,
+            "EndDate": end_date,
+            "PageSize": page_size,
+            "Page": page
+        }
+        
+        response = requests.get(
+            f"{BASE_URL}/Actions",
+            auth=get_auth(),
+            params=params,
+            headers={"Accept": "application/json"}
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        batch = data.get("Actions", [])
+        if not batch:
+            break
+            
+        actions.extend(batch)
+        if len(batch) < page_size:
+            break
+        page += 1
+    
+    return actions
+
+
+def fetch_clicks_by_partner(start_date: str, end_date: str) -> Dict[str, int]:
+    """
+    Fetch click data aggregated by partner.
+    Uses the Media Partner Performance report.
+    """
+    partner_clicks = {}
+    
+    params = {
+        "StartDate": start_date,
+        "EndDate": end_date
+    }
+    
+    response = requests.get(
+        f"{BASE_URL}/Reports/mp_performance_by_day",
+        auth=get_auth(),
+        params=params,
+        headers={"Accept": "application/json"}
+    )
+    response.raise_for_status()
+    records = response.json().get("Records", [])
+    
+    for record in records:
+        partner = record.get("MediaPartnerName", "Unknown")
+        clicks = int(record.get("Clicks", 0) or 0)
+        partner_clicks[partner] = partner_clicks.get(partner, 0) + clicks
+    
+    return partner_clicks
+
+
+def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]:
+    """
+    Fetch aggregated stats by media partner including clicks and costs.
+    """
+    partner_stats = {}
+    
+    params = {
+        "StartDate": start_date,
+        "EndDate": end_date
+    }
+    
+    response = requests.get(
+        f"{BASE_URL}/Reports/mp_performance_by_day",
+        auth=get_auth(),
+        params=params,
+        headers={"Accept": "application/json"}
+    )
+    response.raise_for_status()
+    records = response.json().get("Records", [])
+    
+    for record in records:
+        partner = record.get("MediaPartnerName", "Unknown")
+        if partner not in partner_stats:
+            partner_stats[partner] = {"clicks": 0, "cost": 0.0}
+        
+        partner_stats[partner]["clicks"] += int(record.get("Clicks", 0) or 0)
+        partner_stats[partner]["cost"] += float(record.get("ActionCost", 0) or 0)
+    
+    return partner_stats
+
+
+# =============================================================================
+# DATA PROCESSING
+# =============================================================================
+
+def process_metrics(actions: list[dict], partner_stats: Dict[str, Dict]) -> Dict[str, Any]:
+    """
+    Process raw data into the key metrics we care about.
+    """
+    # Initialize counters
+    payment_success_actions = 0
+    reversed_actions = 0
+    total_actions = 0
+    
+    # Partner-level tracking
+    partner_metrics = {}
+    
+    for action in actions:
+        partner = action.get("MediaPartnerName", "Unknown")
+        status = (action.get("State", "") or "").lower()
+        payout = float(action.get("Payout", 0) or 0)
+        
+        # Initialize partner if needed
+        if partner not in partner_metrics:
+            partner_metrics[partner] = {
+                "payment_success": 0,
+                "reversed": 0,
+                "total_actions": 0,
+                "cost": 0.0
+            }
+        
+        total_actions += 1
+        partner_metrics[partner]["total_actions"] += 1
+        partner_metrics[partner]["cost"] += payout
+        
+        # Check if this is a payment success action using Event Type ID
+        event_type_id = str(action.get("EventTypeId", "") or action.get("EventTypeCode", "") or "")
+        event_type_name = (action.get("EventTypeName", "") or action.get("ActionName", "") or "").lower()
+        
+        is_payment_success = (
+            event_type_id == PAYMENT_SUCCESS_EVENT_TYPE_ID or
+            PAYMENT_SUCCESS_EVENT_TYPE_NAME.lower() in event_type_name
+        )
+        
+        if is_payment_success:
+            payment_success_actions += 1
+            partner_metrics[partner]["payment_success"] += 1
+        
+        # Check for reversals
+        if status in ["reversed", "rejected"]:
+            reversed_actions += 1
+            partner_metrics[partner]["reversed"] += 1
+    
+    # Calculate total clicks and cost from partner stats
+    total_clicks = sum(p.get("clicks", 0) for p in partner_stats.values())
+    total_cost = sum(p.get("cost", 0) for p in partner_stats.values())
+    
+    # If cost from reports is 0, fall back to payout sum from actions
+    if total_cost == 0:
+        total_cost = sum(p["cost"] for p in partner_metrics.values())
+    
+    # Merge click data into partner metrics
+    for partner, stats in partner_stats.items():
+        if partner not in partner_metrics:
+            partner_metrics[partner] = {
+                "payment_success": 0,
+                "reversed": 0,
+                "total_actions": 0,
+                "cost": stats.get("cost", 0)
+            }
+        partner_metrics[partner]["clicks"] = stats.get("clicks", 0)
+    
+    # Calculate derived metrics
+    cpc = total_cost / total_clicks if total_clicks > 0 else 0
+    conversion_rate = (payment_success_actions / total_clicks * 100) if total_clicks > 0 else 0
+    reversal_rate = (reversed_actions / total_actions * 100) if total_actions > 0 else 0
+    cac = total_cost / payment_success_actions if payment_success_actions > 0 else 0
+    
+    return {
+        "payment_success_actions": payment_success_actions,
+        "total_cost": total_cost,
+        "clicks": total_clicks,
+        "cpc": cpc,
+        "conversion_rate": conversion_rate,
+        "reversal_rate": reversal_rate,
+        "cac": cac,
+        "reversed_actions": reversed_actions,
+        "total_actions": total_actions,
+        "partner_metrics": partner_metrics
+    }
+
+
+def calculate_changes(current: Dict, previous: Dict) -> Dict[str, Any]:
+    """Calculate WoW changes for each metric."""
+    
+    def calc_change(curr: float, prev: float) -> Dict:
+        if prev == 0:
+            pct = None if curr == 0 else float('inf')
+        else:
+            pct = ((curr - prev) / prev) * 100
+        return {"current": curr, "previous": prev, "change_pct": pct, "change_abs": curr - prev}
+    
+    return {
+        "payment_success_actions": calc_change(
+            current["payment_success_actions"], 
+            previous["payment_success_actions"]
+        ),
+        "total_cost": calc_change(current["total_cost"], previous["total_cost"]),
+        "clicks": calc_change(current["clicks"], previous["clicks"]),
+        "cpc": calc_change(current["cpc"], previous["cpc"]),
+        "conversion_rate": calc_change(current["conversion_rate"], previous["conversion_rate"]),
+        "reversal_rate": calc_change(current["reversal_rate"], previous["reversal_rate"]),
+        "cac": calc_change(current["cac"], previous["cac"]),
+    }
+
+
+def identify_partner_drivers(
+    current_metrics: Dict, 
+    previous_metrics: Dict
+) -> Dict[str, list]:
+    """
+    Identify which partners drove the biggest changes in key metrics.
+    Returns top movers (positive and negative) for each metric.
+    """
+    current_partners = current_metrics["partner_metrics"]
+    previous_partners = previous_metrics["partner_metrics"]
+    
+    # Get all partners
+    all_partners = set(current_partners.keys()) | set(previous_partners.keys())
+    
+    # Calculate changes per partner
+    partner_changes = []
+    for partner in all_partners:
+        curr = current_partners.get(partner, {"payment_success": 0, "cost": 0, "clicks": 0})
+        prev = previous_partners.get(partner, {"payment_success": 0, "cost": 0, "clicks": 0})
+        
+        partner_changes.append({
+            "partner": partner,
+            "actions_change": curr.get("payment_success", 0) - prev.get("payment_success", 0),
+            "actions_current": curr.get("payment_success", 0),
+            "cost_change": curr.get("cost", 0) - prev.get("cost", 0),
+            "cost_current": curr.get("cost", 0),
+            "clicks_change": curr.get("clicks", 0) - prev.get("clicks", 0),
+            "clicks_current": curr.get("clicks", 0),
+        })
+    
+    # Sort by absolute change to find biggest movers
+    actions_movers = sorted(partner_changes, key=lambda x: abs(x["actions_change"]), reverse=True)[:3]
+    cost_movers = sorted(partner_changes, key=lambda x: abs(x["cost_change"]), reverse=True)[:3]
+    clicks_movers = sorted(partner_changes, key=lambda x: abs(x["clicks_change"]), reverse=True)[:3]
+    
+    # Filter out zero changes
+    actions_movers = [p for p in actions_movers if p["actions_change"] != 0]
+    cost_movers = [p for p in cost_movers if p["cost_change"] != 0]
+    clicks_movers = [p for p in clicks_movers if p["clicks_change"] != 0]
+    
+    return {
+        "actions": actions_movers,
+        "cost": cost_movers,
+        "clicks": clicks_movers
+    }
+
+
+# =============================================================================
+# SLACK FORMATTING
+# =============================================================================
+
+def format_currency(amount: float) -> str:
+    return f"${amount:,.2f}"
+
+
+def format_number(num: float, decimals: int = 0) -> str:
+    if decimals == 0:
+        return f"{num:,.0f}"
+    return f"{num:,.{decimals}f}"
+
+
+def format_pct(value: float) -> str:
+    return f"{value:.2f}%"
+
+
+def format_trend(change_data: Dict, is_inverse: bool = False) -> str:
+    """
+    Format a trend with emoji. 
+    is_inverse=True means lower is better (e.g., CAC, CPC, Reversal Rate)
+    """
+    pct = change_data.get("change_pct")
+    if pct is None:
+        return "—"
+    if pct == float('inf'):
+        return "🆕"
+    
+    # Determine if change is good or bad
+    is_positive_change = pct > 0
+    is_good = is_positive_change if not is_inverse else not is_positive_change
+    
+    emoji = "🟢" if is_good else "🔴" if not is_good else "⚪"
+    if abs(pct) < 1:
+        emoji = "⚪"
+    
+    sign = "+" if pct > 0 else ""
+    return f"{emoji} {sign}{pct:.1f}%"
+
+
+def format_partner_movers(movers: list, metric_type: str) -> str:
+    """Format partner movers into readable text."""
+    if not movers:
+        return "_No significant changes_"
+    
+    lines = []
+    for p in movers:
+        if metric_type == "actions":
+            change = p["actions_change"]
+            sign = "+" if change > 0 else ""
+            lines.append(f"• *{p['partner']}*: {sign}{change:,.0f} actions")
+        elif metric_type == "cost":
+            change = p["cost_change"]
+            sign = "+" if change > 0 else ""
+            lines.append(f"• *{p['partner']}*: {sign}${change:,.2f}")
+        elif metric_type == "clicks":
+            change = p["clicks_change"]
+            sign = "+" if change > 0 else ""
+            lines.append(f"• *{p['partner']}*: {sign}{change:,.0f} clicks")
+    
+    return "\n".join(lines)
+
+
+def build_slack_message(
+    current: Dict,
+    changes: Dict,
+    partner_drivers: Dict,
+    date_range: tuple[str, str]
+) -> Dict[str, Any]:
+    """Build Slack Block Kit message."""
+    
+    start_date, end_date = date_range
+    
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "📊 Weekly Affiliate Performance Report",
+                "emoji": True
+            }
+        },
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"*{start_date}* to *{end_date}* (Mon-Sun)"}
+            ]
+        },
+        {"type": "divider"},
+        
+        # Primary Metrics Section
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*🎯 Primary Metrics*"}
+        },
+        {
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Actions (Payment Success)*\n*{format_number(current['payment_success_actions'])}*\n{format_trend(changes['payment_success_actions'])} WoW"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Total Cost*\n*{format_currency(current['total_cost'])}*\n{format_trend(changes['total_cost'], is_inverse=True)} WoW"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*CAC*\n*{format_currency(current['cac'])}*\n{format_trend(changes['cac'], is_inverse=True)} WoW"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Conversion Rate*\n*{format_pct(current['conversion_rate'])}*\n{format_trend(changes['conversion_rate'])} WoW"
+                }
+            ]
+        },
+        
+        # Secondary Metrics Section
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*📈 Efficiency Metrics*"}
+        },
+        {
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Clicks*\n*{format_number(current['clicks'])}*\n{format_trend(changes['clicks'])} WoW"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*CPC*\n*{format_currency(current['cpc'])}*\n{format_trend(changes['cpc'], is_inverse=True)} WoW"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Reversal Rate*\n*{format_pct(current['reversal_rate'])}*\n{format_trend(changes['reversal_rate'], is_inverse=True)} WoW"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": " "  # Empty field for alignment
+                }
+            ]
+        },
+        {"type": "divider"},
+        
+        # Partner Attribution Section
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "*🔍 What Drove the Changes?*"}
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Actions (Payment Success) Movers:*\n{format_partner_movers(partner_drivers['actions'], 'actions')}"
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Cost Movers:*\n{format_partner_movers(partner_drivers['cost'], 'cost')}"
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Click Movers:*\n{format_partner_movers(partner_drivers['clicks'], 'clicks')}"
+            }
+        },
+        {"type": "divider"},
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": "🟢 = favorable change | 🔴 = unfavorable change | Data from Impact.com"}
+            ]
+        }
+    ]
+    
+    return {"blocks": blocks}
+
+
+def send_to_slack(message: Dict[str, Any]) -> bool:
+    """Send message to Slack via webhook."""
+    if not SLACK_WEBHOOK_URL:
+        print("⚠️  Slack webhook not configured. Message preview:")
+        print(json.dumps(message, indent=2))
+        return False
+    
+    response = requests.post(
+        SLACK_WEBHOOK_URL,
+        json=message,
+        headers={"Content-Type": "application/json"}
+    )
+    
+    if response.status_code == 200:
+        print("✅ Message sent to Slack successfully!")
+        return True
+    else:
+        print(f"❌ Failed to send to Slack: {response.status_code} - {response.text}")
+        return False
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def run_weekly_report():
+    """Generate and send the weekly report."""
+    print("🚀 Starting Impact.com Weekly Report...")
+    
+    # Validate configuration
+    validate_config()
+    
+    # Get date ranges (Mon-Sun)
+    current_start, current_end = get_week_range(weeks_back=0)
+    previous_start, previous_end = get_week_range(weeks_back=1)
+    
+    print(f"📅 Current week: {current_start} to {current_end}")
+    print(f"📅 Previous week: {previous_start} to {previous_end}")
+    
+    # Fetch current week data
+    print("📥 Fetching current week data...")
+    current_actions = fetch_actions(current_start, current_end)
+    current_partner_stats = fetch_media_partner_stats(current_start, current_end)
+    print(f"   Found {len(current_actions)} actions, {len(current_partner_stats)} partners")
+    
+    # Fetch previous week data
+    print("📥 Fetching previous week data...")
+    previous_actions = fetch_actions(previous_start, previous_end)
+    previous_partner_stats = fetch_media_partner_stats(previous_start, previous_end)
+    print(f"   Found {len(previous_actions)} actions, {len(previous_partner_stats)} partners")
+    
+    # Process metrics
+    print("🔄 Processing metrics...")
+    current_metrics = process_metrics(current_actions, current_partner_stats)
+    previous_metrics = process_metrics(previous_actions, previous_partner_stats)
+    
+    # Calculate changes
+    changes = calculate_changes(current_metrics, previous_metrics)
+    partner_drivers = identify_partner_drivers(current_metrics, previous_metrics)
+    
+    # Print summary to console
+    print("\n📊 Summary:")
+    print(f"   Actions (Payment Success): {current_metrics['payment_success_actions']} ({changes['payment_success_actions']['change_pct']:.1f}% WoW)")
+    print(f"   Total Cost: ${current_metrics['total_cost']:,.2f} ({changes['total_cost']['change_pct']:.1f}% WoW)")
+    print(f"   CAC: ${current_metrics['cac']:,.2f} ({changes['cac']['change_pct']:.1f}% WoW)")
+    print(f"   Conversion Rate: {current_metrics['conversion_rate']:.2f}%")
+    
+    # Build and send Slack message
+    print("\n📝 Building Slack message...")
+    message = build_slack_message(
+        current_metrics,
+        changes,
+        partner_drivers,
+        (current_start, current_end)
+    )
+    
+    send_to_slack(message)
+    
+    return {
+        "period": f"{current_start} to {current_end}",
+        "metrics": current_metrics,
+        "changes": changes,
+        "partner_drivers": partner_drivers
+    }
+
+
+if __name__ == "__main__":
+    run_weekly_report()
