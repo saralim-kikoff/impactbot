@@ -34,6 +34,7 @@ import json
 ACCOUNT_SID = os.getenv("IMPACT_ACCOUNT_SID")
 AUTH_TOKEN = os.getenv("IMPACT_AUTH_TOKEN")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
+CAMPAIGN_ID = os.getenv("IMPACT_CAMPAIGN_ID", "14994")
 BASE_URL = f"https://api.impact.com/Advertisers/{ACCOUNT_SID}"
 
 # Validate required environment variables
@@ -80,7 +81,7 @@ def get_week_range(weeks_back: int = 0) -> tuple[str, str]:
     return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 
 
-def fetch_actions(start_date: str, end_date: str, campaign_id: str = None) -> list[dict]:
+def fetch_actions(start_date: str, end_date: str) -> list[dict]:
     """Fetch all conversion actions within a date range."""
     actions = []
     page = 1
@@ -88,15 +89,12 @@ def fetch_actions(start_date: str, end_date: str, campaign_id: str = None) -> li
     
     while True:
         params = {
+            "CampaignId": CAMPAIGN_ID,
             "ActionDateStart": f"{start_date}T00:00:00Z",
             "ActionDateEnd": f"{end_date}T23:59:59Z",
             "PageSize": page_size,
             "Page": page
         }
-        
-        # Add campaign filter if specified
-        if campaign_id:
-            params["CampaignId"] = campaign_id
         
         response = requests.get(
             f"{BASE_URL}/Actions",
@@ -131,6 +129,7 @@ def fetch_clicks_by_partner(start_date: str, end_date: str) -> Dict[str, int]:
     partner_clicks = {}
     
     params = {
+        "CampaignId": CAMPAIGN_ID,
         "StartDate": f"{start_date}T00:00:00Z",
         "EndDate": f"{end_date}T23:59:59Z"
     }
@@ -167,6 +166,7 @@ def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]
     partner_stats = {}
     
     params = {
+        "CampaignId": CAMPAIGN_ID,
         "StartDate": f"{start_date}T00:00:00Z",
         "EndDate": f"{end_date}T23:59:59Z"
     }
