@@ -121,83 +121,250 @@ def fetch_actions(start_date: str, end_date: str) -> list[dict]:
     return actions
 
 
-def fetch_clicks_by_partner(start_date: str, end_date: str) -> Dict[str, int]:
-    """
-    Fetch click data aggregated by partner.
-    Uses the Media Partner Performance report.
-    """
-    partner_clicks = {}
-    
-    params = {
-        "CampaignId": CAMPAIGN_ID,
-        "StartDate": f"{start_date}T00:00:00Z",
-        "EndDate": f"{end_date}T23:59:59Z"
-    }
-    
+def list_available_reports() -> list:
+    """List all reports available to this account."""
     try:
         response = requests.get(
-            f"{BASE_URL}/Reports/mp_performance_by_day",
+            f"{BASE_URL}/Reports",
             auth=get_auth(),
-            params=params,
             headers={"Accept": "application/json"}
         )
         
         if response.status_code != 200:
-            print(f"⚠️  Clicks API returned {response.status_code}")
-            return {}
+            print(f"⚠️  List Reports returned {response.status_code}: {response.text[:200]}")
+            return []
         
-        records = response.json().get("Records", [])
+        data = response.json()
+        reports = data.get("Reports", [])
+        
+        print(f"📋 Available Reports ({len(reports)} total):")
+        for report in reports[:15]:  # Show first 15
+            api_accessible = report.get("ApiAccessible", False)
+            marker = "✅" if api_accessible else "❌"
+            print(f"   {marker} {report.get('Name', 'Unknown')} (ID: {report.get('Id', 'N/A')})")
+        
+        if len(reports) > 15:
+            print(f"   ... and {len(reports) - 15} more")
+        
+        return reports
     except Exception as e:
-        print(f"⚠️  Error fetching clicks: {e}")
-        return {}
+        print(f"⚠️  Error listing reports: {e}")
+        return []
+
+
+def fetch_clicks_from_report(start_date: str, end_date: str) -> int:
+    """
+    Fetch clicks using the Reports API.
+    Tries to find a click-related report and run it.
+    """
+    # First, list available reports to find a click report
+    reports = list_available_reports()
     
-    for record in records:
-        partner = record.get("MediaPartnerName", "Unknown")
-        clicks = int(record.get("Clicks", 0) or 0)
-        partner_clicks[partner] = partner_clicks.get(partner, 0) + clicks
+    # Look for click-related reports
+    click_reports = [r for r in reports if 'click' in r.get('Name', '').lower() and r.get('ApiAccessible', False)]
+    performance_reports = [r for r in reports if 'performance' in r.get('Name', '').lower() and r.get('ApiAccessible', False)]
     
-    return partner_clicks
+    # Try click reports first, then performance reports
+    reports_to_try = click_reports + performance_reports
+    
+    if not reports_to_try:
+        print("⚠️  No accessible click or performance reports found")
+        return 0
+    
+    for report in reports_to_try[:3]:  # Try up to 3 reports
+        report_id = report.get('Id')
+        report_name = report.get('Name')
+        print(f"   🔄 Trying report: {report_name} (ID: {report_id})")
+        
+        try:
+            params = {
+                "StartDate": f"{start_date}T00:00:00Z",
+                "EndDate": f"{end_date}T23:59:59Z",
+                "CampaignId": CAMPAIGN_ID
+            }
+            
+            response = requests.get(
+                f"{BASE_URL}/Reports/{report_id}",
+                auth=get_auth(),
+                params=params,
+                headers={"Accept": "application/json"}
+            )
+            
+            if response.status_code != 200:
+                print(f"      ⚠️  Report returned {response.status_code}")
+                continue
+            
+            data = response.json()
+            records = data.get("Records", [])
+            
+            if records:
+                print(f"      ✅ Got {len(records)} records")
+                # Debug: show first record's keys
+                if records:
+                    print(f"      📋 Fields: {list(records[0].keys())[:10]}")
+                
+                # Try to sum clicks from various possible field names
+                total_clicks = 0
+                for record in records:
+                    clicks = (
+                        record.get("Clicks", 0) or 
+                        record.get("TotalClicks", 0) or 
+                        record.get("Click_Count", 0) or
+                        0
+                    )
+                    total_clicks += int(clicks) if clicks else 0
+                
+                if total_clicks > 0:
+                    print(f"      ✅ Total clicks: {total_clicks}")
+                    return total_clicks
+                    
+        except Exception as e:
+            print(f"      ⚠️  Error: {e}")
+            continue
+    
+    return 0
+
+
+def fetch_clicks_for_date_range(start_date: str, end_date: str) -> int:
+    """
+    Fetch total clicks for a date range using ClickExport endpoint.
+    This is an async endpoint - it schedules a job and we poll for results.
+    """
+    from datetime import datetime, timedelta
+    import time
+    
+    total_clicks = 0
+    
+    # ClickExport only supports one date at a time, so we need to loop through each day
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    
+    print(f"   🔄 Fetching clicks from {start_date} to {end_date}...")
+    
+    current_date = start
+    while current_date <= end:
+        date_str = current_date.strftime("%Y-%m-%d")
+        
+        try:
+            # Schedule the click export job
+            params = {
+                "Date": date_str,
+                "ResultFormat": "JSON"
+            }
+            
+            response = requests.get(
+                f"{BASE_URL}/Programs/{CAMPAIGN_ID}/ClickExport",
+                auth=get_auth(),
+                params=params,
+                headers={"Accept": "application/json"}
+            )
+            
+            if response.status_code == 403:
+                print(f"   ⚠️  ClickExport API returned 403 - no access")
+                return 0
+            
+            if response.status_code != 200:
+                print(f"   ⚠️  ClickExport returned {response.status_code} for {date_str}")
+                current_date += timedelta(days=1)
+                continue
+            
+            job_data = response.json()
+            print(f"   📋 ClickExport response for {date_str}: {list(job_data.keys())}")
+            
+            # Check if we got a job URI to poll
+            job_uri = job_data.get("ResultUri") or job_data.get("JobUri") or job_data.get("Uri")
+            
+            if not job_uri:
+                # Maybe the response contains clicks directly
+                clicks = job_data.get("Clicks", [])
+                if isinstance(clicks, list):
+                    day_clicks = len(clicks)
+                    total_clicks += day_clicks
+                    print(f"      {date_str}: {day_clicks} clicks (direct)")
+                current_date += timedelta(days=1)
+                continue
+            
+            # Poll for job completion (max 30 seconds per day)
+            print(f"      Polling job for {date_str}...")
+            for attempt in range(10):
+                time.sleep(3)
+                
+                # Handle relative vs absolute URI
+                if job_uri.startswith("/"):
+                    poll_url = f"https://api.impact.com{job_uri}"
+                else:
+                    poll_url = job_uri
+                
+                job_response = requests.get(
+                    poll_url,
+                    auth=get_auth(),
+                    headers={"Accept": "application/json"}
+                )
+                
+                if job_response.status_code == 200:
+                    result = job_response.json()
+                    status = result.get("Status", "").upper()
+                    
+                    if status == "COMPLETED":
+                        # Get the download URI and fetch clicks
+                        download_uri = result.get("DownloadUri") or result.get("ResultUri")
+                        if download_uri:
+                            if download_uri.startswith("/"):
+                                download_url = f"https://api.impact.com{download_uri}"
+                            else:
+                                download_url = download_uri
+                                
+                            download_response = requests.get(
+                                download_url,
+                                auth=get_auth(),
+                                headers={"Accept": "application/json"}
+                            )
+                            if download_response.status_code == 200:
+                                click_data = download_response.json()
+                                clicks = click_data.get("Clicks", [])
+                                if isinstance(clicks, list):
+                                    day_clicks = len(clicks)
+                                    total_clicks += day_clicks
+                                    print(f"      {date_str}: {day_clicks} clicks")
+                        break
+                    elif status in ["FAILED", "ERROR"]:
+                        print(f"      ⚠️  Job failed for {date_str}")
+                        break
+                    # else: still processing, keep polling
+                        
+        except Exception as e:
+            print(f"   ⚠️  Error fetching clicks for {date_str}: {e}")
+        
+        current_date += timedelta(days=1)
+    
+    print(f"   ✅ Total clicks: {total_clicks}")
+    return total_clicks
+
+
+def fetch_clicks_by_partner(start_date: str, end_date: str) -> Dict[str, int]:
+    """
+    Fetch click data. Returns total clicks since ClickExport doesn't easily aggregate by partner.
+    """
+    # Skip this - we'll get clicks in fetch_media_partner_stats
+    return {}
 
 
 def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]:
     """
-    Fetch aggregated stats by media partner including clicks and costs.
+    Fetch aggregated stats by media partner including clicks.
+    Tries Reports API first, then falls back to ClickExport.
     """
-    partner_stats = {}
+    print("   🔍 Attempting to fetch clicks via Reports API...")
     
-    params = {
-        "CampaignId": CAMPAIGN_ID,
-        "StartDate": f"{start_date}T00:00:00Z",
-        "EndDate": f"{end_date}T23:59:59Z"
-    }
+    # Try Reports API first
+    total_clicks = fetch_clicks_from_report(start_date, end_date)
     
-    try:
-        response = requests.get(
-            f"{BASE_URL}/Reports/mp_performance_by_day",
-            auth=get_auth(),
-            params=params,
-            headers={"Accept": "application/json"}
-        )
-        
-        if response.status_code != 200:
-            print(f"⚠️  Reports API returned {response.status_code}: {response.text}")
-            # Return empty dict instead of failing - we can still get data from Actions
-            return {}
-        
-        records = response.json().get("Records", [])
-    except Exception as e:
-        print(f"⚠️  Error fetching partner stats: {e}")
-        return {}
+    # If Reports didn't work, try ClickExport
+    if total_clicks == 0:
+        print("   🔍 Trying ClickExport as fallback...")
+        total_clicks = fetch_clicks_for_date_range(start_date, end_date)
     
-    for record in records:
-        partner = record.get("MediaPartnerName", "Unknown")
-        if partner not in partner_stats:
-            partner_stats[partner] = {"clicks": 0, "cost": 0.0}
-        
-        partner_stats[partner]["clicks"] += int(record.get("Clicks", 0) or 0)
-        partner_stats[partner]["cost"] += float(record.get("ActionCost", 0) or 0)
-    
-    return partner_stats
+    return {"_total": {"clicks": total_clicks, "cost": 0}}
 
 
 # =============================================================================
