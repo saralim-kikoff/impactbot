@@ -87,44 +87,60 @@ def fetch_actions_via_report(start_date: str, end_date: str) -> list[dict]:
     """
     print(f"   🔍 Trying Advanced Action Listing report for custom fields...")
     
-    params = {
-        "CampaignId": CAMPAIGN_ID,
-        "ActionDateStart": f"{start_date}T00:00:00Z",
-        "ActionDateEnd": f"{end_date}T23:59:59Z"
-    }
+    # Try multiple report IDs that might have Text1
+    report_ids = [
+        "adv_action_listing_pm_only",
+        "adv_action_list_sku_pm_only",
+        "advanced_action_listing_with_sku"
+    ]
     
-    try:
-        response = requests.get(
-            f"{BASE_URL}/Reports/adv_action_listing_pm_only",
-            auth=get_auth(),
-            params=params,
-            headers={"Accept": "application/json"}
-        )
+    for report_id in report_ids:
+        print(f"      Trying report: {report_id}")
         
-        if response.status_code != 200:
-            print(f"   ⚠️  Advanced Action Listing returned {response.status_code}: {response.text[:200]}")
-            return []
+        params = {
+            "CampaignId": CAMPAIGN_ID,
+            "ActionDateStart": f"{start_date}T00:00:00Z",
+            "ActionDateEnd": f"{end_date}T23:59:59Z"
+        }
         
-        data = response.json()
-        records = data.get("Records", [])
-        
-        if records:
-            print(f"   ✅ Got {len(records)} records from Advanced Action Listing")
-            # DEBUG: Show all field names from first record
-            print(f"   📋 DEBUG - Fields available: {list(records[0].keys())}")
-            # DEBUG: Show sample of Text fields if present
-            sample = records[0]
-            text_fields = {k: v for k, v in sample.items() if 'text' in k.lower() or 'Text' in k}
-            if text_fields:
-                print(f"   📋 DEBUG - Text fields found: {text_fields}")
+        try:
+            response = requests.get(
+                f"{BASE_URL}/Reports/{report_id}",
+                auth=get_auth(),
+                params=params,
+                headers={"Accept": "application/json"}
+            )
+            
+            print(f"      Response status: {response.status_code}")
+            
+            if response.status_code != 200:
+                print(f"      ⚠️  Report returned {response.status_code}: {response.text[:300]}")
+                continue
+            
+            data = response.json()
+            records = data.get("Records", [])
+            
+            if records:
+                print(f"      ✅ Got {len(records)} records")
+                # DEBUG: Show all field names from first record
+                print(f"      📋 Fields available: {list(records[0].keys())}")
+                # DEBUG: Show sample of Text fields if present
+                sample = records[0]
+                text_fields = {k: v for k, v in sample.items() if 'text' in k.lower() or 'Text' in k}
+                if text_fields:
+                    print(f"      📋 Text fields found: {text_fields}")
+                else:
+                    print(f"      📋 No Text fields found in response")
+                return records
             else:
-                print(f"   📋 DEBUG - No Text fields found in response")
-        
-        return records
-        
-    except Exception as e:
-        print(f"   ⚠️  Error fetching Advanced Action Listing: {e}")
-        return []
+                print(f"      ⚠️  Report returned 0 records")
+            
+        except Exception as e:
+            print(f"      ⚠️  Error: {e}")
+            continue
+    
+    print(f"   ⚠️  No reports returned data with Text fields")
+    return []
 
 
 def fetch_actions(start_date: str, end_date: str) -> list[dict]:
