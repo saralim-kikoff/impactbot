@@ -184,11 +184,11 @@ def process_metrics(actions: list[dict], partner_stats: Dict[str, Dict]) -> Dict
         if is_payment_success:
             payment_success_actions += 1
             partner_metrics[partner]["payment_success"] += 1
-        
-        # Check for reversals
-        if status in ["reversed", "rejected"]:
-            reversed_actions += 1
-            partner_metrics[partner]["reversed"] += 1
+            
+            # Check for reversals - only count reversed Payment Success actions
+            if status in ["reversed", "rejected"]:
+                reversed_actions += 1
+                partner_metrics[partner]["reversed"] += 1
     
     # Calculate total clicks and cost from partner stats (if available)
     total_clicks = sum(p.get("clicks", 0) for p in partner_stats.values()) if partner_stats else 0
@@ -213,14 +213,15 @@ def process_metrics(actions: list[dict], partner_stats: Dict[str, Dict]) -> Dict
     # Note: CPC and Conversion Rate require click data from Reports API
     cpc = total_cost / total_clicks if total_clicks > 0 else None
     conversion_rate = (payment_success_actions / total_clicks * 100) if total_clicks > 0 else None
-    reversal_rate = (reversed_actions / total_actions * 100) if total_actions > 0 else 0
+    # Reversal rate = reversed Payment Success actions / total Payment Success actions
+    reversal_rate = (reversed_actions / payment_success_actions * 100) if payment_success_actions > 0 else 0
     cac = total_cost / payment_success_actions if payment_success_actions > 0 else None
     
     # DEBUG: Print statuses found
     print(f"   🔍 DEBUG - Action Statuses Found:")
     for status, count in sorted(statuses_seen.items(), key=lambda x: -x[1]):
         print(f"      {status}: {count} actions")
-    print(f"   🔍 DEBUG - Reversed count: {reversed_actions}, Total: {total_actions}, Rate: {reversal_rate:.2f}%")
+    print(f"   🔍 DEBUG - Payment Success: {payment_success_actions}, Reversed: {reversed_actions}, Reversal Rate: {reversal_rate:.2f}%")
     
     return {
         "payment_success_actions": payment_success_actions,
