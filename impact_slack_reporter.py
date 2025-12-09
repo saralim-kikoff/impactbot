@@ -620,11 +620,17 @@ def run_weekly_report():
     def fmt_pct(val):
         return f"{val:.1f}" if val is not None else "N/A"
     
+    def fmt_currency(val):
+        return f"${val:,.2f}" if val is not None else "N/A"
+    
+    def fmt_num(val):
+        return f"{val:,}" if val is not None else "N/A"
+    
     print("\n📊 Summary:")
-    print(f"   Actions (Payment Success): {current_metrics['payment_success_actions']} ({fmt_pct(changes['payment_success_actions']['change_pct'])}% WoW)")
-    print(f"   Total Cost: ${current_metrics['total_cost']:,.2f} ({fmt_pct(changes['total_cost']['change_pct'])}% WoW)")
-    print(f"   CAC: ${current_metrics['cac']:,.2f} ({fmt_pct(changes['cac']['change_pct'])}% WoW)")
-    print(f"   Conversion Rate: {current_metrics['conversion_rate']:.2f}%")
+    print(f"   Actions (Payment Success): {fmt_num(current_metrics['payment_success_actions'])} ({fmt_pct(changes['payment_success_actions']['change_pct'])}% WoW)")
+    print(f"   Total Cost: {fmt_currency(current_metrics['total_cost'])} ({fmt_pct(changes['total_cost']['change_pct'])}% WoW)")
+    print(f"   CAC: {fmt_currency(current_metrics['cac'])} ({fmt_pct(changes['cac']['change_pct'])}% WoW)")
+    print(f"   Conversion Rate: {fmt_pct(current_metrics['conversion_rate'])}%")
     
     # Build and send Slack message
     print("\n📝 Building Slack message...")
