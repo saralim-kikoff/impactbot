@@ -216,6 +216,9 @@ def process_metrics(actions: list[dict], partner_stats: Dict[str, Dict]) -> Dict
     # Partner-level tracking
     partner_metrics = {}
     
+    # DEBUG: Track all event types we see
+    event_types_seen = {}
+    
     for action in actions:
         partner = action.get("MediaPartnerName", "Unknown")
         status = (action.get("State", "") or "").lower()
@@ -235,8 +238,12 @@ def process_metrics(actions: list[dict], partner_stats: Dict[str, Dict]) -> Dict
         partner_metrics[partner]["cost"] += payout
         
         # Check if this is a payment success action using Event Type ID
-        event_type_id = str(action.get("EventTypeId", "") or action.get("EventTypeCode", "") or "")
-        event_type_name = (action.get("EventTypeName", "") or action.get("ActionName", "") or "").lower()
+        event_type_id = str(action.get("EventTypeId", "") or action.get("ActionTrackerId", "") or "")
+        event_type_name = (action.get("EventTypeName", "") or action.get("ActionTrackerName", "") or "").lower()
+        
+        # DEBUG: Track event types
+        key = f"{event_type_id}: {event_type_name}"
+        event_types_seen[key] = event_types_seen.get(key, 0) + 1
         
         is_payment_success = (
             event_type_id == PAYMENT_SUCCESS_EVENT_TYPE_ID or
@@ -277,6 +284,11 @@ def process_metrics(actions: list[dict], partner_stats: Dict[str, Dict]) -> Dict
     conversion_rate = (payment_success_actions / total_clicks * 100) if total_clicks > 0 else None
     reversal_rate = (reversed_actions / total_actions * 100) if total_actions > 0 else 0
     cac = total_cost / payment_success_actions if payment_success_actions > 0 else None
+    
+    # DEBUG: Print all event types found
+    print(f"\n🔍 DEBUG - Event Types Found (looking for ID '{PAYMENT_SUCCESS_EVENT_TYPE_ID}' or name containing '{PAYMENT_SUCCESS_EVENT_TYPE_NAME}'):")
+    for event_type, count in sorted(event_types_seen.items(), key=lambda x: -x[1])[:10]:
+        print(f"   {event_type} → {count} actions")
     
     return {
         "payment_success_actions": payment_success_actions,
