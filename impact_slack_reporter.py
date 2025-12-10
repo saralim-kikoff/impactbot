@@ -125,54 +125,25 @@ def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]
     """
     Fetch aggregated stats including clicks.
     1. List all reports to find Performance by Day report ID
-    2. Use ReportExport endpoint to export the report
+    2. Use ReportExport endpoint with correct parameters
+    3. Poll Jobs endpoint for results
     """
     import time
     
     total_clicks = 0
-    report_id = None
+    report_id = "att_adv_performance_by_day_pm_only"
     
-    # Step 1: List all reports to find the correct one
-    try:
-        print(f"   🔍 Listing available reports...")
-        response = requests.get(
-            f"{BASE_URL}/Reports",
-            auth=get_auth(),
-            headers={"Accept": "application/json"}
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            reports = data.get("Reports", [])
-            
-            # Find Performance by Day report
-            perf_reports = [r for r in reports if "performance" in r.get("Name", "").lower() and "day" in r.get("Name", "").lower()]
-            
-            print(f"   📋 Found {len(reports)} total reports")
-            print(f"   📋 Performance by Day reports:")
-            for r in perf_reports:
-                rid = r.get('Id')
-                print(f"      - {r.get('Name')} (ID: {rid}, ApiAccessible: {r.get('ApiAccessible')})")
-                if r.get('ApiAccessible') and not report_id:
-                    report_id = rid
-        else:
-            print(f"   ⚠️  List reports returned {response.status_code}")
-            
-    except Exception as e:
-        print(f"   ⚠️  Error listing reports: {e}")
-    
-    if not report_id:
-        report_id = "att_adv_performance_by_day_pm_only"  # Fallback
-    
-    # Step 2: Use ReportExport endpoint
-    print(f"   🔍 Exporting report: {report_id}")
-    
+    # ReportExport with correct parameter names per documentation
+    # StartDate and EndDate (camelCase), SUBAID for program/campaign
     params = {
-        "START_DATE": start_date,
-        "END_DATE": end_date,
+        "StartDate": start_date,
+        "EndDate": end_date,
+        "SUBAID": CAMPAIGN_ID,
+        "ResultFormat": "JSON",
     }
     
     try:
+        print(f"   🔍 Calling ReportExport with params: {params}")
         response = requests.get(
             f"{BASE_URL}/ReportExport/{report_id}",
             auth=get_auth(),
@@ -183,58 +154,65 @@ def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]
         print(f"   Response status: {response.status_code}")
         
         if response.status_code != 200:
-            print(f"   ⚠️  ReportExport returned {response.status_code}: {response.text[:200]}")
+            print(f"   ⚠️  ReportExport returned {response.status_code}: {response.text[:300]}")
             return {}
         
         data = response.json()
-        print(f"   Response keys: {list(data.keys())}")
+        print(f"   Response: {data}")
         
-        # Check if it's an async job
-        if "ResultUri" in data:
-            result_uri = data.get("ResultUri")
-            print(f"   📋 Async job - polling ResultUri: {result_uri}")
+        # Check for job URIs
+        queued_uri = data.get("QueuedUri")
+        result_uri = data.get("ResultUri")
+        
+        if queued_uri:
+            print(f"   📋 QueuedUri: {queued_uri}")
+        if result_uri:
+            print(f"   📋 ResultUri: {result_uri}")
+        
+        # Try polling QueuedUri (Jobs endpoint) instead of ResultUri
+        poll_uri = queued_uri or result_uri
+        if poll_uri:
+            print(f"   🔄 Polling: {poll_uri}")
             
-            # Poll for results (max 30 seconds)
             for attempt in range(10):
-                print(f"   Polling (attempt {attempt + 1}/10)...")
+                print(f"   Attempt {attempt + 1}/10...")
                 
-                result_response = requests.get(
-                    f"https://api.impact.com{result_uri}",
+                poll_response = requests.get(
+                    f"https://api.impact.com{poll_uri}",
                     auth=get_auth(),
                     headers={"Accept": "application/json"}
                 )
                 
-                print(f"   Poll status: {result_response.status_code}")
+                print(f"   Poll status: {poll_response.status_code}")
                 
-                if result_response.status_code == 200:
-                    result_data = result_response.json()
-                    print(f"   Poll response keys: {list(result_data.keys())}")
+                if poll_response.status_code == 200:
+                    poll_data = poll_response.json()
+                    print(f"   Poll response: {poll_data}")
                     
-                    if result_data.get("Status") == "COMPLETE":
-                        records = result_data.get("Records", [])
+                    status = poll_data.get("Status")
+                    if status == "COMPLETE":
+                        # Try to get records or download URL
+                        records = poll_data.get("Records", [])
+                        download_uri = poll_data.get("DownloadUri") or poll_data.get("ResultUri")
+                        
                         if records:
                             print(f"   ✅ Got {len(records)} records")
-                            print(f"   📋 Fields: {list(records[0].keys())}")
-                            print(f"   📋 Sample: {records[0]}")
+                            for record in records:
+                                clicks = record.get("Clicks") or 0
+                                if clicks:
+                                    total_clicks += int(float(clicks))
+                            return {"_total": {"clicks": total_clicks, "cost": 0}}
+                        
+                        if download_uri:
+                            print(f"   📥 DownloadUri: {download_uri}")
                         break
+                    elif status == "ERROR":
+                        print(f"   ❌ Job failed")
+                        break
+                else:
+                    print(f"   ⚠️  Poll failed: {poll_response.text[:200]}")
                 
                 time.sleep(3)
-        
-        # Check if records are directly in response
-        records = data.get("Records", [])
-        if records:
-            sample = records[0]
-            print(f"   📋 Fields: {list(sample.keys())}")
-            print(f"   📋 Sample: {sample}")
-            
-            for record in records:
-                clicks = record.get("Clicks") or record.get("clicks") or 0
-                if clicks and clicks != "":
-                    total_clicks += int(float(clicks))
-            
-            if total_clicks > 0:
-                print(f"   ✅ Total clicks: {total_clicks:,}")
-                return {"_total": {"clicks": total_clicks, "cost": 0}}
                 
     except Exception as e:
         print(f"   ⚠️  Error: {e}")
