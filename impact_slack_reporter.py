@@ -561,7 +561,9 @@ def run_weekly_report():
         hist_start, hist_end = get_week_range(weeks_back=weeks_back)
         hist_actions = fetch_actions(hist_start, hist_end)
         hist_metrics = process_metrics(hist_actions, {})
-        historical_tops.append(get_top_partners(hist_metrics, n=10))
+        top_partners = get_top_partners(hist_metrics, n=10)
+        historical_tops.append(top_partners)
+        print(f"      Week {weeks_back} back ({hist_start}): Top 10 = {top_partners[:5]}...")  # Show first 5
     print(f"   Analyzed {len(historical_tops)} historical weeks")
     
     # Process metrics
@@ -571,9 +573,12 @@ def run_weekly_report():
     
     # Identify new top 10 partners
     current_top_10 = get_top_partners(current_metrics, n=10)
+    print(f"   Current week top 10: {current_top_10}")
     new_top_partners = identify_new_top_partners(current_top_10, historical_tops)
     if new_top_partners:
         print(f"   🆕 New top 10 partners: {', '.join(new_top_partners)}")
+    else:
+        print(f"   ℹ️  No new top 10 partners this week")
     
     # Calculate changes
     changes = calculate_changes(current_metrics, previous_metrics)
