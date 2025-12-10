@@ -125,48 +125,60 @@ def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]
     """
     Fetch aggregated stats including clicks.
     Uses the Reports endpoint for Performance by Day report.
-    Note: This report is aggregated by day, not by partner.
     """
     total_clicks = 0
     report_id = "att_adv_performance_by_day_pm_only"
     
-    params = {
-        "START_DATE": start_date,
-        "END_DATE": end_date,
-        "CAMPAIGN_ID": CAMPAIGN_ID
-    }
+    # Try different parameter combinations
+    param_sets = [
+        # With timestamps
+        {"START_DATE": f"{start_date}T00:00:00Z", "END_DATE": f"{end_date}T23:59:59Z", "CAMPAIGN_ID": CAMPAIGN_ID},
+        # Without campaign filter
+        {"START_DATE": start_date, "END_DATE": end_date},
+        # Different date format
+        {"Start Date": start_date, "End Date": end_date},
+    ]
     
-    try:
-        print(f"   🔍 Fetching Performance by Day report...")
-        response = requests.get(
-            f"{BASE_URL}/Reports/{report_id}",
-            auth=get_auth(),
-            params=params,
-            headers={"Accept": "application/json"}
-        )
-        
-        if response.status_code != 200:
-            print(f"   ⚠️  Report returned {response.status_code}")
-            return {}
-        
-        data = response.json()
-        records = data.get("Records", [])
-        
-        if records:
-            # Debug: show first record to see actual values
-            print(f"   📋 Sample record: {records[0]}")
+    for params in param_sets:
+        try:
+            print(f"   🔍 Trying params: {list(params.keys())}")
+            response = requests.get(
+                f"{BASE_URL}/Reports/{report_id}",
+                auth=get_auth(),
+                params=params,
+                headers={"Accept": "application/json"}
+            )
             
-            for record in records:
-                clicks = record.get("Clicks") or 0
-                total_clicks += int(clicks) if clicks else 0
+            if response.status_code != 200:
+                print(f"   ⚠️  Status {response.status_code}")
+                continue
             
-            print(f"   ✅ Total clicks: {total_clicks:,}")
+            data = response.json()
+            records = data.get("Records", [])
             
-    except Exception as e:
-        print(f"   ⚠️  Error: {e}")
+            if records:
+                # Check if first record has actual data
+                sample = records[0]
+                clicks_value = sample.get("Clicks", "")
+                
+                print(f"   📋 Sample Clicks value: '{clicks_value}' (type: {type(clicks_value).__name__})")
+                
+                if clicks_value and clicks_value != "":
+                    for record in records:
+                        clicks = record.get("Clicks") or 0
+                        if clicks:
+                            total_clicks += int(clicks)
+                    
+                    print(f"   ✅ Total clicks: {total_clicks:,}")
+                    return {"_total": {"clicks": total_clicks, "cost": 0}}
+                else:
+                    print(f"   ⚠️  Records have empty values")
+                    
+        except Exception as e:
+            print(f"   ⚠️  Error: {e}")
     
-    # Return as aggregate since this report doesn't break down by partner
-    return {"_total": {"clicks": total_clicks, "cost": 0}}
+    print(f"   ⚠️  No click data available from report")
+    return {"_total": {"clicks": 0, "cost": 0}}
 
 
 # =============================================================================
