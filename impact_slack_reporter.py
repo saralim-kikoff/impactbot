@@ -123,13 +123,13 @@ def fetch_actions(start_date: str, end_date: str) -> list[dict]:
 
 def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]:
     """
-    Fetch aggregated stats by media partner including clicks.
-    Uses the Reports endpoint (ApiRunUri) for Performance by Day report.
+    Fetch aggregated stats including clicks.
+    Uses the Reports endpoint for Performance by Day report.
+    Note: This report is aggregated by day, not by partner.
     """
-    partner_stats = {}
+    total_clicks = 0
     report_id = "att_adv_performance_by_day_pm_only"
     
-    # Try the direct Reports endpoint (ApiRunUri)
     params = {
         "START_DATE": start_date,
         "END_DATE": end_date,
@@ -145,45 +145,25 @@ def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]
             headers={"Accept": "application/json"}
         )
         
-        print(f"   Response status: {response.status_code}")
-        
         if response.status_code != 200:
-            print(f"   ⚠️  Report returned {response.status_code}: {response.text[:200]}")
+            print(f"   ⚠️  Report returned {response.status_code}")
             return {}
         
         data = response.json()
         records = data.get("Records", [])
         
         if records:
-            print(f"   ✅ Got {len(records)} records")
-            print(f"   📋 Fields: {list(records[0].keys())}")
-            
             for record in records:
-                partner = (
-                    record.get("Media_Name") or 
-                    record.get("MediaPartnerName") or 
-                    record.get("Media") or
-                    record.get("Partner_Name") or
-                    record.get("Partner") or 
-                    "Unknown"
-                )
-                if partner not in partner_stats:
-                    partner_stats[partner] = {"clicks": 0, "cost": 0.0}
-                
-                clicks = (
-                    record.get("Clicks") or 
-                    record.get("Total_Clicks") or 
-                    record.get("TotalClicks") or 
-                    0
-                )
-                partner_stats[partner]["clicks"] += int(clicks) if clicks else 0
-        else:
-            print(f"   ⚠️  Report returned 0 records")
+                clicks = record.get("Clicks") or 0
+                total_clicks += int(clicks) if clicks else 0
+            
+            print(f"   ✅ Total clicks: {total_clicks:,}")
             
     except Exception as e:
         print(f"   ⚠️  Error: {e}")
     
-    return partner_stats
+    # Return as aggregate since this report doesn't break down by partner
+    return {"_total": {"clicks": total_clicks, "cost": 0}}
 
 
 # =============================================================================
@@ -506,6 +486,19 @@ def build_slack_message(
                 {
                     "type": "mrkdwn",
                     "text": f"*Reversal Rate*\n*{format_pct(current['reversal_rate'])}*\nvs {format_pct(changes['reversal_rate']['previous'])} prev\n{format_trend(changes['reversal_rate'], is_inverse=True)} WoW"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Clicks*\n*{format_number(current['clicks'])}*\nvs {format_number(changes['clicks']['previous'])} prev\n{format_trend(changes['clicks'])} WoW"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Conversion Rate*\n*{format_pct(current['conversion_rate'])}*\nvs {format_pct(changes['conversion_rate']['previous'])} prev\n{format_trend(changes['conversion_rate'])} WoW"
                 }
             ]
         },
