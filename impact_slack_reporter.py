@@ -130,7 +130,7 @@ def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]
     total_clicks = 0
     report_id = "att_adv_performance_by_day_pm_only"
     
-    # Try with SUBAID (program ID) - required per docs
+    # SUBAID is required per docs for program filtering
     params = {
         "START_DATE": start_date,
         "END_DATE": end_date,
@@ -138,7 +138,7 @@ def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]
     }
     
     try:
-        print(f"   🔍 Calling ReportExport with SUBAID={CAMPAIGN_ID}...")
+        print(f"   🔍 Fetching clicks via ReportExport...")
         response = requests.get(
             f"{BASE_URL}/ReportExport/{report_id}",
             auth=get_auth(),
@@ -147,7 +147,7 @@ def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]
         )
         
         if response.status_code != 200:
-            print(f"   ⚠️  ReportExport failed: {response.status_code} - {response.text[:200]}")
+            print(f"   ⚠️  ReportExport failed: {response.status_code}")
             return {}
         
         data = response.json()
@@ -166,51 +166,36 @@ def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]
             )
             
             if status_response.status_code != 200:
-                print(f"   ⚠️  Job status check failed: {status_response.status_code}")
                 time.sleep(2)
                 continue
             
             job_data = status_response.json()
             job_status = job_data.get("Status", "").upper()
             
-            print(f"   Attempt {attempt + 1}/15 - Status: {job_status}")
-            
             if job_status == "COMPLETED":
                 # Download the results
                 result_uri = job_data.get("ResultUri")
                 if result_uri:
-                    print(f"   📥 Downloading results...")
                     dl_response = requests.get(
                         f"https://api.impact.com{result_uri}",
                         auth=get_auth(),
                         headers={"Accept": "application/json"}
                     )
                     
-                    print(f"   Download status: {dl_response.status_code}")
-                    
                     if dl_response.status_code == 200:
-                        # Check content type - might be CSV or JSON
+                        # Parse CSV
+                        import csv
+                        import io
                         content_type = dl_response.headers.get("Content-Type", "")
-                        print(f"   Content-Type: {content_type}")
-                        
-                        # Show raw response for debugging
-                        print(f"   Raw response (first 500 chars): {dl_response.text[:500]}")
                         
                         if "json" in content_type:
                             dl_data = dl_response.json()
                             records = dl_data.get("Records", [])
                         else:
-                            # Parse CSV
-                            import csv
-                            import io
                             reader = csv.DictReader(io.StringIO(dl_response.text))
                             records = list(reader)
                         
                         if records:
-                            print(f"   ✅ Got {len(records)} records")
-                            print(f"   📋 Fields: {list(records[0].keys())}")
-                            print(f"   📋 Sample: {records[0]}")
-                            
                             for record in records:
                                 clicks = record.get("Clicks") or record.get("clicks") or 0
                                 if clicks and str(clicks).strip():
@@ -219,8 +204,6 @@ def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]
                             print(f"   ✅ Total clicks: {total_clicks:,}")
                             if total_clicks > 0:
                                 return {"_total": {"clicks": total_clicks, "cost": 0}}
-                    else:
-                        print(f"   ⚠️  Download failed: {dl_response.text[:200]}")
                 break
                 
             elif job_status in ["FAILED", "CANCELLED", "ERROR"]:
@@ -546,8 +529,21 @@ def build_slack_message(
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Total Cost*\n*{format_currency(current['total_cost'])}*\nvs {format_currency(changes['total_cost']['previous'])} prev\n{format_trend(changes['total_cost'], is_inverse=True)} WoW"
+                    "text": f"*Clicks*\n*{format_number(current['clicks'])}*\nvs {format_number(changes['clicks']['previous'])} prev\n{format_trend(changes['clicks'])} WoW"
                 },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Conversion Rate*\n*{format_pct(current['conversion_rate'])}*\nvs {format_pct(changes['conversion_rate']['previous'])} prev\n{format_trend(changes['conversion_rate'])} WoW"
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Total Cost*\n*{format_currency(current['total_cost'])}*\nvs {format_currency(changes['total_cost']['previous'])} prev\n{format_trend(changes['total_cost'], is_inverse=True)} WoW"
+                }
+            ]
+        },
+        {
+            "type": "section",
+            "fields": [
                 {
                     "type": "mrkdwn",
                     "text": f"*CAC*\n*{format_currency(current['cac'])}*\nvs {format_currency(changes['cac']['previous'])} prev\n{format_trend(changes['cac'], is_inverse=True)} WoW"
