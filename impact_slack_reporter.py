@@ -222,8 +222,6 @@ def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]
                             print(f"   ✅ Total clicks: {total_clicks:,} across {len(partner_clicks)} partners")
                             
                             if total_clicks > 0:
-                                # Add total for backward compatibility
-                                partner_clicks["_total"] = {"clicks": total_clicks, "cost": 0}
                                 return partner_clicks
                 break
                 
@@ -317,8 +315,9 @@ def process_metrics(actions: list[dict], partner_stats: Dict[str, Dict]) -> Dict
                 partner_metrics[partner]["reversed"] += 1
     
     # Calculate total clicks and cost from partner stats (if available)
-    total_clicks = sum(p.get("clicks", 0) for p in partner_stats.values()) if partner_stats else 0
-    total_cost = sum(p.get("cost", 0) for p in partner_stats.values()) if partner_stats else 0
+    # Exclude _total key to avoid double counting
+    total_clicks = sum(p.get("clicks", 0) for k, p in partner_stats.items() if k != "_total") if partner_stats else 0
+    total_cost = sum(p.get("cost", 0) for k, p in partner_stats.items() if k != "_total") if partner_stats else 0
     
     # If cost from reports is 0, fall back to payout sum from actions
     if total_cost == 0:
@@ -391,6 +390,9 @@ def identify_partner_drivers(
     """
     Identify which partners drove the biggest changes in key metrics.
     Returns top movers (positive and negative) for each metric.
+    
+    CAC Movers: Partners whose cost/action ratio change contributed most to overall CAC change
+    CVR Movers: Partners whose click/conversion changes contributed most to overall CVR change
     """
     current_partners = current_metrics["partner_metrics"]
     previous_partners = previous_metrics["partner_metrics"]
@@ -398,36 +400,89 @@ def identify_partner_drivers(
     # Get all partners
     all_partners = set(current_partners.keys()) | set(previous_partners.keys())
     
+    # Calculate overall metrics for context
+    total_current_actions = current_metrics.get("payment_success_actions", 0)
+    total_prev_actions = previous_metrics.get("payment_success_actions", 0)
+    total_current_clicks = current_metrics.get("clicks", 0)
+    total_prev_clicks = previous_metrics.get("clicks", 0)
+    total_current_cost = current_metrics.get("total_cost", 0)
+    total_prev_cost = previous_metrics.get("total_cost", 0)
+    
     # Calculate changes per partner
     partner_changes = []
     for partner in all_partners:
         curr = current_partners.get(partner, {"payment_success": 0, "cost": 0, "clicks": 0})
         prev = previous_partners.get(partner, {"payment_success": 0, "cost": 0, "clicks": 0})
         
+        curr_actions = curr.get("payment_success", 0)
+        prev_actions = prev.get("payment_success", 0)
+        curr_cost = curr.get("cost", 0)
+        prev_cost = prev.get("cost", 0)
+        curr_clicks = curr.get("clicks", 0)
+        prev_clicks = prev.get("clicks", 0)
+        
+        actions_change = curr_actions - prev_actions
+        cost_change = curr_cost - prev_cost
+        clicks_change = curr_clicks - prev_clicks
+        
+        # Calculate CAC contribution
+        # A partner contributes to CAC increase if their cost increased more than actions
+        # or if their cost stayed same but actions decreased
+        curr_cac = curr_cost / curr_actions if curr_actions > 0 else 0
+        prev_cac = prev_cost / prev_actions if prev_actions > 0 else 0
+        cac_change = curr_cac - prev_cac
+        
+        # Weight CAC change by partner's share of total cost (impact on overall CAC)
+        cost_share = curr_cost / total_current_cost if total_current_cost > 0 else 0
+        cac_impact = cac_change * cost_share
+        
+        # Calculate CVR contribution
+        # CVR = actions / clicks
+        # A partner impacts CVR if their clicks/actions ratio changed significantly
+        curr_cvr = (curr_actions / curr_clicks * 100) if curr_clicks > 0 else 0
+        prev_cvr = (prev_actions / prev_clicks * 100) if prev_clicks > 0 else 0
+        cvr_change = curr_cvr - prev_cvr
+        
+        # Weight CVR change by partner's share of total clicks (impact on overall CVR)
+        clicks_share = curr_clicks / total_current_clicks if total_current_clicks > 0 else 0
+        cvr_impact = cvr_change * clicks_share
+        
         partner_changes.append({
             "partner": partner,
-            "actions_change": curr.get("payment_success", 0) - prev.get("payment_success", 0),
-            "actions_current": curr.get("payment_success", 0),
-            "cost_change": curr.get("cost", 0) - prev.get("cost", 0),
-            "cost_current": curr.get("cost", 0),
-            "clicks_change": curr.get("clicks", 0) - prev.get("clicks", 0),
-            "clicks_current": curr.get("clicks", 0),
+            "actions_change": actions_change,
+            "actions_current": curr_actions,
+            "cost_change": cost_change,
+            "cost_current": curr_cost,
+            "clicks_change": clicks_change,
+            "clicks_current": curr_clicks,
+            "cac_change": cac_change,
+            "cac_impact": cac_impact,
+            "curr_cac": curr_cac,
+            "prev_cac": prev_cac,
+            "cvr_change": cvr_change,
+            "cvr_impact": cvr_impact,
+            "curr_cvr": curr_cvr,
+            "prev_cvr": prev_cvr,
         })
     
     # Sort by absolute change to find biggest movers
     actions_movers = sorted(partner_changes, key=lambda x: abs(x["actions_change"]), reverse=True)[:3]
-    cost_movers = sorted(partner_changes, key=lambda x: abs(x["cost_change"]), reverse=True)[:3]
-    clicks_movers = sorted(partner_changes, key=lambda x: abs(x["clicks_change"]), reverse=True)[:3]
     
-    # Filter out zero changes
+    # CAC movers - sorted by impact on overall CAC (weighted by cost share)
+    cac_movers = sorted(partner_changes, key=lambda x: abs(x["cac_impact"]), reverse=True)[:3]
+    
+    # CVR movers - sorted by impact on overall CVR (weighted by clicks share)  
+    cvr_movers = sorted(partner_changes, key=lambda x: abs(x["cvr_impact"]), reverse=True)[:3]
+    
+    # Filter out zero/negligible changes
     actions_movers = [p for p in actions_movers if p["actions_change"] != 0]
-    cost_movers = [p for p in cost_movers if p["cost_change"] != 0]
-    clicks_movers = [p for p in clicks_movers if p["clicks_change"] != 0]
+    cac_movers = [p for p in cac_movers if abs(p["cac_impact"]) > 0.01]  # > 1 cent impact
+    cvr_movers = [p for p in cvr_movers if abs(p["cvr_impact"]) > 0.01]  # > 0.01% impact
     
     return {
         "actions": actions_movers,
-        "cost": cost_movers,
-        "clicks": clicks_movers
+        "cac": cac_movers,
+        "cvr": cvr_movers
     }
 
 
@@ -493,10 +548,39 @@ def format_partner_movers(movers: list, metric_type: str) -> str:
             change = p["actions_change"]
             sign = "+" if change > 0 else ""
             lines.append(f"• *{p['partner']}*: {sign}{change:,.0f} actions")
-        elif metric_type == "cost":
-            change = p["cost_change"]
-            sign = "+" if change > 0 else ""
-            lines.append(f"• *{p['partner']}*: {sign}${change:,.2f}")
+        elif metric_type == "cac":
+            # Show CAC change with context
+            cac_change = p["cac_change"]
+            curr_cac = p["curr_cac"]
+            prev_cac = p["prev_cac"]
+            if cac_change > 0:
+                lines.append(f"• *{p['partner']}*: CAC ↑ ${prev_cac:.2f} → ${curr_cac:.2f}")
+            else:
+                lines.append(f"• *{p['partner']}*: CAC ↓ ${prev_cac:.2f} → ${curr_cac:.2f}")
+        elif metric_type == "cvr":
+            # Show CVR change with context
+            cvr_change = p["cvr_change"]
+            curr_cvr = p["curr_cvr"]
+            prev_cvr = p["prev_cvr"]
+            clicks_change = p["clicks_change"]
+            actions_change = p["actions_change"]
+            
+            if cvr_change > 0:
+                arrow = "↑"
+            else:
+                arrow = "↓"
+            
+            # Add context about what drove the change
+            context = ""
+            if abs(clicks_change) > abs(actions_change) * 10:
+                # Clicks changed much more than actions
+                sign = "+" if clicks_change > 0 else ""
+                context = f" ({sign}{clicks_change:,.0f} clicks)"
+            elif abs(actions_change) > 0:
+                sign = "+" if actions_change > 0 else ""
+                context = f" ({sign}{actions_change:,.0f} actions)"
+            
+            lines.append(f"• *{p['partner']}*: CVR {arrow} {prev_cvr:.2f}% → {curr_cvr:.2f}%{context}")
         elif metric_type == "clicks":
             change = p["clicks_change"]
             sign = "+" if change > 0 else ""
@@ -601,7 +685,14 @@ def build_slack_message(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*Cost Movers:*\n{format_partner_movers(partner_drivers['cost'], 'cost')}"
+                "text": f"*CAC Movers:*\n{format_partner_movers(partner_drivers['cac'], 'cac')}"
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*CVR Movers:*\n{format_partner_movers(partner_drivers['cvr'], 'cvr')}"
             }
         },
     ]
