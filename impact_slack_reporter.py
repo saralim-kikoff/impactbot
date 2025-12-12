@@ -81,6 +81,33 @@ def get_week_range(weeks_back: int = 0) -> tuple[str, str]:
     return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 
 
+def get_month_range(months_back: int = 1) -> tuple[str, str]:
+    """
+    Get first-last day date range for a given month.
+    months_back=1 means last complete month (default for monthly report).
+    months_back=2 means the month before last.
+    """
+    from calendar import monthrange
+    
+    today = datetime.now()
+    
+    # Calculate target month
+    year = today.year
+    month = today.month - months_back
+    
+    # Handle year rollover
+    while month <= 0:
+        month += 12
+        year -= 1
+    
+    # Get first and last day of target month
+    first_day = datetime(year, month, 1)
+    last_day_num = monthrange(year, month)[1]
+    last_day = datetime(year, month, last_day_num)
+    
+    return first_day.strftime("%Y-%m-%d"), last_day.strftime("%Y-%m-%d")
+
+
 def fetch_actions(start_date: str, end_date: str) -> list[dict]:
     """Fetch all conversion actions within a date range."""
     actions = []
@@ -595,7 +622,8 @@ def build_slack_message(
     partner_drivers: Dict,
     date_range: tuple[str, str],
     prev_date_range: tuple[str, str],
-    new_top_partners: list[str] = None
+    new_top_partners: list[str] = None,
+    report_type: str = "weekly"
 ) -> Dict[str, Any]:
     """Build Slack Block Kit message."""
     
@@ -603,12 +631,20 @@ def build_slack_message(
     prev_start, prev_end = prev_date_range
     partner_metrics = current.get("partner_metrics", {})
     
+    # Set title and comparison label based on report type
+    if report_type == "monthly":
+        title = "📊 Monthly Impact Affiliate Performance Report"
+        comparison_label = "MoM"
+    else:
+        title = "📊 Weekly Impact Affiliate Performance Report"
+        comparison_label = "WoW"
+    
     blocks = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": "📊 Weekly Impact Affiliate Performance Report",
+                "text": title,
                 "emoji": True
             }
         },
@@ -631,11 +667,11 @@ def build_slack_message(
             "fields": [
                 {
                     "type": "mrkdwn",
-                    "text": f"*Actions (Payment Success)*\n*{format_number(current['payment_success_actions'])}*\nvs {format_number(changes['payment_success_actions']['previous'])} prev\n{format_trend(changes['payment_success_actions'])} WoW"
+                    "text": f"*Actions (Payment Success)*\n*{format_number(current['payment_success_actions'])}*\nvs {format_number(changes['payment_success_actions']['previous'])} prev\n{format_trend(changes['payment_success_actions'])} {comparison_label}"
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Clicks*\n*{format_number(current['clicks'])}*\nvs {format_number(changes['clicks']['previous'])} prev\n{format_trend(changes['clicks'])} WoW"
+                    "text": f"*Clicks*\n*{format_number(current['clicks'])}*\nvs {format_number(changes['clicks']['previous'])} prev\n{format_trend(changes['clicks'])} {comparison_label}"
                 }
             ]
         },
@@ -645,11 +681,11 @@ def build_slack_message(
             "fields": [
                 {
                     "type": "mrkdwn",
-                    "text": f"*Conversion Rate*\n*{format_pct(current['conversion_rate'])}*\nvs {format_pct(changes['conversion_rate']['previous'])} prev\n{format_trend(changes['conversion_rate'])} WoW"
+                    "text": f"*Conversion Rate*\n*{format_pct(current['conversion_rate'])}*\nvs {format_pct(changes['conversion_rate']['previous'])} prev\n{format_trend(changes['conversion_rate'])} {comparison_label}"
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Total Cost*\n*{format_currency(current['total_cost'])}*\nvs {format_currency(changes['total_cost']['previous'])} prev\n{format_trend(changes['total_cost'], is_inverse=True)} WoW"
+                    "text": f"*Total Cost*\n*{format_currency(current['total_cost'])}*\nvs {format_currency(changes['total_cost']['previous'])} prev\n{format_trend(changes['total_cost'], is_inverse=True)} {comparison_label}"
                 }
             ]
         },
@@ -659,11 +695,11 @@ def build_slack_message(
             "fields": [
                 {
                     "type": "mrkdwn",
-                    "text": f"*CAC*\n*{format_currency(current['cac'])}*\nvs {format_currency(changes['cac']['previous'])} prev\n{format_trend(changes['cac'], is_inverse=True)} WoW"
+                    "text": f"*CAC*\n*{format_currency(current['cac'])}*\nvs {format_currency(changes['cac']['previous'])} prev\n{format_trend(changes['cac'], is_inverse=True)} {comparison_label}"
                 },
                 {
                     "type": "mrkdwn",
-                    "text": f"*Reversal Rate*\n*{format_pct(current['reversal_rate'])}*\nvs {format_pct(changes['reversal_rate']['previous'])} prev\n{format_trend(changes['reversal_rate'], is_inverse=True)} WoW"
+                    "text": f"*Reversal Rate*\n*{format_pct(current['reversal_rate'])}*\nvs {format_pct(changes['reversal_rate']['previous'])} prev\n{format_trend(changes['reversal_rate'], is_inverse=True)} {comparison_label}"
                 }
             ]
         },
@@ -842,5 +878,104 @@ def run_weekly_report():
     }
 
 
+def run_monthly_report():
+    """Generate and send the monthly report for the previous completed month."""
+    print("🚀 Starting Impact.com Monthly Report...")
+    
+    # Validate configuration
+    validate_config()
+    
+    # Get date ranges (full months)
+    current_start, current_end = get_month_range(months_back=1)  # Last month
+    previous_start, previous_end = get_month_range(months_back=2)  # Month before last
+    
+    print(f"📅 Current month: {current_start} to {current_end}")
+    print(f"📅 Previous month: {previous_start} to {previous_end}")
+    
+    # Fetch current month data
+    print("📥 Fetching current month data...")
+    current_actions = fetch_actions(current_start, current_end)
+    current_partner_stats = fetch_media_partner_stats(current_start, current_end)
+    print(f"   Found {len(current_actions)} actions")
+    
+    # Fetch previous month data
+    print("📥 Fetching previous month data...")
+    previous_actions = fetch_actions(previous_start, previous_end)
+    previous_partner_stats = fetch_media_partner_stats(previous_start, previous_end)
+    print(f"   Found {len(previous_actions)} actions")
+    
+    # Fetch historical data (months 2-4 back) for new partner detection
+    print("📥 Fetching historical data for new partner detection...")
+    historical_tops = []
+    for months_back in range(1, 4):  # months 1-3 back
+        hist_start, hist_end = get_month_range(months_back=months_back)
+        hist_actions = fetch_actions(hist_start, hist_end)
+        hist_metrics = process_metrics(hist_actions, {})
+        top_partners = get_top_partners(hist_metrics, n=10)
+        historical_tops.append(top_partners)
+        print(f"      Month {months_back} back ({hist_start[:7]}): {top_partners[:5]}...")
+    print(f"   Analyzed {len(historical_tops)} historical months")
+    
+    # Process metrics
+    print("🔄 Processing metrics...")
+    current_metrics = process_metrics(current_actions, current_partner_stats)
+    previous_metrics = process_metrics(previous_actions, previous_partner_stats)
+    
+    # Identify new top 10 partners
+    current_top_10 = get_top_partners(current_metrics, n=10)
+    print(f"   Current month top 10: {current_top_10}")
+    new_top_partners = identify_new_top_partners(current_top_10, historical_tops)
+    if new_top_partners:
+        print(f"   🆕 New top 10 partners: {', '.join(new_top_partners)}")
+    else:
+        print(f"   ℹ️  No new top 10 partners this month")
+    
+    # Calculate changes
+    changes = calculate_changes(current_metrics, previous_metrics)
+    partner_drivers = identify_partner_drivers(current_metrics, previous_metrics)
+    
+    # Print summary to console
+    def fmt_pct(val):
+        return f"{val:.1f}" if val is not None else "N/A"
+    
+    def fmt_currency(val):
+        return f"${val:,.2f}" if val is not None else "N/A"
+    
+    def fmt_num(val):
+        return f"{val:,}" if val is not None else "N/A"
+    
+    print("\n📊 Summary:")
+    print(f"   Actions (Payment Success): {fmt_num(current_metrics['payment_success_actions'])} ({fmt_pct(changes['payment_success_actions']['change_pct'])}% MoM)")
+    print(f"   Total Cost: {fmt_currency(current_metrics['total_cost'])} ({fmt_pct(changes['total_cost']['change_pct'])}% MoM)")
+    print(f"   CAC: {fmt_currency(current_metrics['cac'])} ({fmt_pct(changes['cac']['change_pct'])}% MoM)")
+    print(f"   Reversal Rate: {fmt_pct(current_metrics['reversal_rate'])}%")
+    
+    # Build and send Slack message
+    print("\n📝 Building Slack message...")
+    message = build_slack_message(
+        current_metrics,
+        changes,
+        partner_drivers,
+        (current_start, current_end),
+        (previous_start, previous_end),
+        new_top_partners,
+        report_type="monthly"
+    )
+    
+    send_to_slack(message)
+    
+    return {
+        "period": f"{current_start} to {current_end}",
+        "metrics": current_metrics,
+        "changes": changes,
+        "partner_drivers": partner_drivers
+    }
+
+
 if __name__ == "__main__":
-    run_weekly_report()
+    import sys
+    
+    if len(sys.argv) > 1 and sys.argv[1] == "monthly":
+        run_monthly_report()
+    else:
+        run_weekly_report()
