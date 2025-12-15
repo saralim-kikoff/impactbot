@@ -279,11 +279,6 @@ def fetch_media_partner_stats(start_date: str, end_date: str) -> Dict[str, Dict]
         traceback.print_exc()
     
     return {}
-                
-    except Exception as e:
-        print(f"   ⚠️  Error: {e}")
-    
-    return {}
 
 
 # =============================================================================
